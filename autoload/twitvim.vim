@@ -1014,8 +1014,10 @@ function! s:getOauthResponse(url, method, parms, token_secret)
     let content = ""
 
     for key in sort(keys(parms))
-        let value = s:url_encode(parms[key])
-        let content .= key . "=" . value . "&"
+        if key != '__json'
+            let value = s:url_encode(parms[key])
+            let content .= key . "=" . value . "&"
+        endif
     endfor
     let content = content[0:-2]
 
@@ -3402,6 +3404,19 @@ function! s:get_list_timeline(username, listname, page, max_id)
     echo "List timeline updated for ".user."/".a:listname
 endfunction
 
+function! s:screen2id(screen_name)
+    let url = s:get_api_root().'/users/show.json'
+    let parms = {}
+    let parms.screen_name = a:screen_name
+    let [error, output] = s:run_curl_oauth_get(url, parms)
+    if !empty(error)
+        call s:errormsg('Error getting user info: '.error)
+        return ''
+    endif
+    let result = s:parse_json(output)
+    return get(result, 'id_str', get(result, 'id', ''))
+endfun
+
 " Show direct message sent or received by user. First argument should be 'sent'
 " or 'received' depending on which timeline we are displaying.
 function! s:show_dm_json(sent_or_recv, timeline, page)
@@ -3434,12 +3449,33 @@ function! s:show_dm_json(sent_or_recv, timeline, page)
         let s:curbuffer.dmids = [0]
     endif
 
-    for item in a:timeline
-        call add(s:curbuffer.dmids, get(item, 'id_str', get(item, 'id', '')))
+    let users = {}
+    let myname = s:get_twitvim_username()
+    for item in a:timeline.events
+        let users[item.message_create.target.recipient_id] = ''
+        let users[item.message_create.sender_id] = ''
+    endfor
 
-        let user = get(item, a:sent_or_recv == 'sent' ? 'recipient_screen_name' : 'sender_screen_name', '')
-        let mesg = s:get_status_text_json(item)
-        let date = s:time_filter(get(item, 'created_at', ''))
+    let ulist = s:get_friends_info_2(keys(users),0)
+    for usr in ulist
+        let users[get(usr, 'id_str', get(usr, 'id', -1))] = get(usr, 'screen_name', '')
+    endfor
+
+    for item in a:timeline.events
+        if a:sent_or_recv == 'sent'
+            if myname != users[item.message_create.sender_id]
+                continue
+            endif
+            let user = users[item.message_create.target.recipient_id]
+        else
+            if myname != users[item.message_create.target.recipient_id]
+                continue
+            endif
+            let user = users[item.message_create.sender_id]
+        endif
+        call add(s:curbuffer.dmids, get(item, 'id_str', get(item, 'id', '')))
+        let mesg = s:get_status_text_json(item.message_create.message_data)
+        let date = s:time_fmt(strcharpart(get(item, 'created_timestamp', ''),0,10))
 
         call add(text, user.": ".s:convert_entity(mesg).' |'.date.'|')
     endfor
@@ -3456,7 +3492,7 @@ function! s:Direct_Messages(mode, page, max_id)
     redraw
     echo "Sending direct messages ".s_or_r." timeline request..."
 
-    let url = s:get_api_root()."/direct_messages".(sent ? "/sent" : "").".json"
+    let url = s:get_api_root()."/direct_messages/events/list.json"
 
     let parms = {}
 
@@ -3897,9 +3933,9 @@ function! s:do_send_dm(user, mesg)
     else
         redraw
         echo "Sending message to ".a:user."..."
-
-        let url = s:get_api_root()."/direct_messages/new.json"
-        let parms = { "source" : "twitvim", "user" : a:user, "text" : mesg }
+        let uid = s:screen2id(a:user)
+        let url = s:get_api_root()."/direct_messages/events/new.json"
+        let parms = {"__json": json_encode({"event":{"type" : "message_create",  "message_create": {"target": {"recipient_id": uid}, "message_data":{"text" : mesg }}}} )}
 
         let [error, output] = s:run_curl_oauth_post(url, parms)
         if !empty(error)
